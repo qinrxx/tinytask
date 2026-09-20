@@ -1,65 +1,89 @@
-# tiny-task
+# tinytask
 
-A dead simple to-do list for the Linux terminal. One bash script, no dependencies.
+A tiny mouse & keyboard macro recorder for Linux — the same idea as TinyTask on
+Windows. Record what you do, play it back as many times as you like. One Python
+file, one dependency.
 
 ```
-  1. [ ] buy milk
-  2. [x] fix the printer
-  3. [ ] call mum
-     1/3 done
+tinytask  F9 record/stop   F10 play   F12 quit
 ```
 
-## Install (Ubuntu / Lubuntu / Debian)
+## Install (Lubuntu / Ubuntu / Debian)
 
 ```bash
-git clone https://github.com/Qinrxx/tiny-task.git
-cd tiny-task
+git clone https://github.com/Qinrxx/tinytask.git
+cd tinytask
 ./install.sh
 ```
 
-That copies the script to `~/.local/bin/task`. If the installer says that folder
-isn't on your PATH:
+The installer pulls in `python3-pynput` and copies the script to
+`~/.local/bin/tinytask`. If it says that folder isn't on your PATH:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
-## Usage
+**X11 only.** Lubuntu's default LXQt session is X11, so it works out of the box.
+If you picked a Wayland session at login, log out and choose the Xorg one —
+Wayland blocks programs from watching and faking input on purpose. Check with
+`echo $XDG_SESSION_TYPE`.
 
-| Command | What it does |
+## Use it like TinyTask (hotkeys)
+
+```bash
+tinytask
+```
+
+Then, anywhere on your desktop:
+
+| Key | What it does |
 | --- | --- |
-| `task` | list all tasks |
-| `task add <text>` | add a task |
-| `task done <n>` | tick task number n |
-| `task undo <n>` | untick task number n |
-| `task rm <n>` | delete task number n |
-| `task clear` | delete all ticked tasks |
-| `task nuke` | delete everything |
-| `task help` | show help |
+| **F9** | start recording — press again to stop and save |
+| **F10** | play the recording back |
+| **F12** | quit (and stops playback mid-run) |
 
-Example:
+Everything is recorded: mouse movement, clicks, scrolling, and every key.
+The recording is saved to `~/.tinytask/last.json`.
+
+## Use it from the command line (named macros, repeats, speed)
 
 ```bash
-task add buy milk
-task add "fix the printer"
-task
-task done 1
-task clear
+tinytask record login      # records until you press F9, saves as "login"
+tinytask play login        # play it once
+tinytask play login -n 10  # play it 10 times
+tinytask play login --loop # keep going until you press F12
+tinytask play login -s 2   # play at double speed (0.5 = half speed)
+tinytask list              # show saved macros, their size and length
 ```
 
-## Where are my tasks stored?
+Named macros live in `~/.tinytask/`. You can also give a real path
+(`tinytask play ~/Desktop/thing.json`) and move those files between machines —
+they're plain JSON.
 
-Plain text at `~/.tiny-task.txt`, one task per line. Edit it by hand if you like.
-Point it somewhere else with the `TINY_TASK_FILE` environment variable:
+## Worked example
 
-```bash
-TINY_TASK_FILE=~/work-tasks.txt task add ship the release
-```
+Say you want to click a button once a second, forever:
+
+1. `tinytask record clicker`
+2. Move to the button, click it, wait a second, click it again.
+3. Press **F9** to stop.
+4. `tinytask play clicker --loop`
+5. Press **F12** when you've had enough.
+
+## Things worth knowing
+
+- Playback repeats the exact screen coordinates you recorded, so move windows
+  back where they were first — or maximise them before recording.
+- **F12 always stops playback**, so avoid pressing F12 inside a macro.
+- A macro that types passwords will store them in plain text in
+  `~/.tinytask/`. Don't record those.
+- Mouse movement is sampled every ~12 ms to keep files small.
+- Set `TINYTASK_DIR` to keep macros somewhere other than `~/.tinytask`.
 
 ## Uninstall
 
 ```bash
-rm ~/.local/bin/task
+rm ~/.local/bin/tinytask && rm -rf ~/.tinytask
 ```
 
 ## License

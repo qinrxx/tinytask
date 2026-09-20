@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""tinytask - a tiny mouse & keyboard macro recorder for Linux (X11).
+
+Record what you do, save it to a file, play it back as many times as you like.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+try:
+    from pynput import keyboard, mouse
+except ImportError:
+    sys.exit(
+        "tinytask needs pynput.\n"
+        "  sudo apt install python3-pynput\n"
+        "or:\n"
+        "  pip install --user pynput"
+    )
+
+MACRO_DIR = os.path.expanduser(os.environ.get("TINYTASK_DIR", "~/.tinytask"))
+DEFAULT_MACRO = os.path.join(MACRO_DIR, "last.json")
+
+REC_KEY = keyboard.Key.f9     # start / stop recording
+PLAY_KEY = keyboard.Key.f10   # play the current macro
+STOP_KEY = keyboard.Key.f12   # stop playback / quit
+MOVE_INTERVAL = 0.012         # seconds between recorded mouse-move samples
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
+
+# ---------------------------------------------------------------- serialising
+
+def key_to_str(key):
+    if isinstance(key, keyboard.Key):
+        return "Key." + key.name
+    if key.char is not None:
+        return key.char
+    return "vk:%d" % key.vk
+
+
+def str_to_key(s):
+    if s.startswith("Key."):
+        return getattr(keyboard.Key, s[4:])
+    if s.startswith("vk:"):
+        return keyboard.KeyCode.from_vk(int(s[3:]))
+    return s
+
+
+def button_to_str(button):
+    return button.name
+
+
+def str_to_button(s):
+    return getattr(mouse.Button, s)
+
+
+# ------------------------------------------------------------------ recording
+
+class Recorder:
+    def __init__(self):
+        self.events = []
+        self.start = time.time()
+        self.last_move = 0.0
+        self.running = False
+
+    def add(self, kind, **data):
+        if not self.running:
+            return
+        data["t"] = round(time.time() - self.start, 4)
+        data["type"] = kind
+        self.events.append(data)
+
+    # mouse
+    def on_move(self, x, y):
+        now = time.time()
+        if now - self.last_move < MOVE_INTERVAL:
+            return
+        self.last_move = now
+        self.add("move", x=x, y=y)
+
+    def on_click(self, x, y, button, pressed):
+        self.add("click", x=x, y=y, button=button_to_str(button), down=pressed)
+
+    def on_scroll(self, x, y, dx, dy):
+        self.add("scroll", x=x, y=y, dx=dx, dy=dy)
+
+    # keyboard
+    def on_press(self, key):
+        if key == REC_KEY:
+            self.running = False
+            return False
+        self.add("key", key=key_to_str(key), down=True)
+
+    def on_release(self, key):
+        if key == REC_KEY:
+            return
+        self.add("key", key=key_to_str(key), down=False)
+
+
+def record(path):
+    rec = Recorder()
+    rec.running = True
+
+    print("%sRecording.%s Press %sF9%s to stop." % (RED, RESET, BOLD, RESET))
+    ml = mouse.Listener(
+        on_move=rec.on_move, on_click=rec.on_click, on_scroll=rec.on_scroll
+    )
+    kl = keyboard.Listener(on_press=rec.on_press, on_release=rec.on_release)
+    ml.start()
+    kl.start()
+    try:
+        kl.join()
+    except KeyboardInterrupt:
+        rec.running = False
+        kl.stop()
+    ml.stop()
+
+    save(path, rec.events)
+    length = rec.events[-1]["t"] if rec.events else 0
+    print("%sSaved%s %d events (%.1fs) to %s"
+          % (GREEN, RESET, len(rec.events), length, path))
+
+
+# ------------------------------------------------------------------- playback
+
+def play(path, repeat=1, speed=1.0, loop=False):
+    events = load(path)
+    if not events:
+        sys.exit("%s has no events in it" % path)
+
+    kb = keyboard.Controller()
+    ms = mouse.Controller()
+    abort = {"stop": False}
+
+    def on_press(key):
+        if key == STOP_KEY:
+            abort["stop"] = True
+            return False
+
+    watcher = keyboard.Listener(on_press=on_press)
+    watcher.start()
+
+    print("%sPlaying%s %s - %d events, speed x%s. Press %sF12%s to stop."
+          % (GREEN, RESET, os.path.basename(path), len(events), speed,
+             BOLD, RESET))
+    time.sleep(0.4)  # give yourself a moment to let go of the keys
+
+    run = 0
+    try:
+        while not abort["stop"]:
+            run += 1
+            began = time.time()
+            for ev in events:
+                if abort["stop"]:
+                    break
+                wait = ev["t"] / speed - (time.time() - began)
+                if wait > 0:
+                    time.sleep(wait)
+                step(ev, kb, ms)
+            if loop:
+                continue
+            if run >= repeat:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.stop()
+
+    print("%sdone%s - %d run(s)%s"
+          % (DIM, RESET, run, " (stopped early)" if abort["stop"] else ""))
+
+
+def step(ev, kb, ms):
+    kind = ev["type"]
+    try:
+        if kind == "move":
+            ms.position = (ev["x"], ev["y"])
+        elif kind == "click":
+            ms.position = (ev["x"], ev["y"])
+            button = str_to_button(ev["button"])
+            if ev["down"]:
+                ms.press(button)
+            else:
+                ms.release(button)
+        elif kind == "scroll":
+            ms.position = (ev["x"], ev["y"])
+            ms.scroll(ev["dx"], ev["dy"])
+        elif kind == "key":
+            key = str_to_key(ev["key"])
+            if ev["down"]:
+                kb.press(key)
+            else:
+                kb.release(key)
+    except Exception as exc:  # a key this keyboard layout can't map, etc.
+        print("%sskipped %s: %s%s" % (YELLOW, kind, exc, RESET), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------- files
+
+def save(path, events):
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump({"version": 1, "events": events}, fh)
+
+
+def load(path):
+    if not os.path.exists(path):
+        sys.exit("no macro at %s - record one first:  tinytask record %s"
+                 % (path, path))
+    with open(path) as fh:
+        return json.load(fh)["events"]
+
+
+def resolve(name):
+    """A bare name means a macro in ~/.tinytask; anything else is a path."""
+    if name is None:
+        return DEFAULT_MACRO
+    if os.sep in name or name.endswith(".json"):
+        return os.path.expanduser(name)
+    return os.path.join(MACRO_DIR, name + ".json")
+
+
+def list_macros():
+    names = []
+    if os.path.isdir(MACRO_DIR):
+        names = sorted(f for f in os.listdir(MACRO_DIR) if f.endswith(".json"))
+    if not names:
+        print("no macros yet - record one with:  tinytask record mymacro")
+        return
+    for name in names:
+        full = os.path.join(MACRO_DIR, name)
+        try:
+            with open(full) as fh:
+                events = json.load(fh)["events"]
+            secs = events[-1]["t"] if events else 0
+            print("  %-20s %5d events  %5.1fs" % (name[:-5], len(events), secs))
+        except Exception:
+            print("  %-20s %s(unreadable)%s" % (name[:-5], DIM, RESET))
+
+
+# -------------------------------------------------------------- hotkey mode
+
+def console(path):
+    """TinyTask-style hotkeys: F9 record/stop, F10 play, F12 quit."""
+    print("%stinytask%s  %sF9%s record/stop   %sF10%s play   %sF12%s quit"
+          % (BOLD, RESET, BOLD, RESET, BOLD, RESET, BOLD, RESET))
+    print("%smacro file: %s%s" % (DIM, path, RESET))
+    while True:
+        pressed = wait_for_hotkey()
+        if pressed == STOP_KEY or pressed is None:
+            print("bye")
+            return
+        if pressed == REC_KEY:
+            record(path)
+        elif pressed == PLAY_KEY:
+            if os.path.exists(path):
+                play(path)
+            else:
+                print("nothing recorded yet - press F9 first")
+
+
+def wait_for_hotkey():
+    hit = {}
+
+    def on_press(key):
+        if key in (REC_KEY, PLAY_KEY, STOP_KEY):
+            hit["key"] = key
+            return False
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+    try:
+        listener.join()
+    except KeyboardInterrupt:
+        listener.stop()
+        return None
+    time.sleep(0.3)  # keep the hotkey itself out of the recording
+    return hit.get("key")
+
+
+# ----------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="tinytask",
+        description="Tiny mouse & keyboard macro recorder for Linux (X11).",
+        epilog="With no arguments: F9 record/stop, F10 play, F12 quit.",
+    )
+    sub = ap.add_subparsers(dest="cmd")
+
+    p_rec = sub.add_parser("record", aliases=["rec"],
+                           help="record a macro (F9 stops)")
+    p_rec.add_argument("name", nargs="?", help="macro name or path")
+
+    p_play = sub.add_parser("play", help="play a macro back (F12 stops)")
+    p_play.add_argument("name", nargs="?", help="macro name or path")
+    p_play.add_argument("-n", "--repeat", type=int, default=1,
+                        help="run it N times")
+    p_play.add_argument("-s", "--speed", type=float, default=1.0,
+                        help="speed multiplier, e.g. 2 = twice as fast")
+    p_play.add_argument("--loop", action="store_true",
+                        help="repeat until you press F12")
+
+    sub.add_parser("list", aliases=["ls"], help="list saved macros")
+
+    args = ap.parse_args()
+
+    if not os.environ.get("DISPLAY"):
+        print("%swarning:%s no $DISPLAY - tinytask needs an X11 session "
+              "(on Wayland, log out and pick an Xorg session)."
+              % (YELLOW, RESET), file=sys.stderr)
+
+    if args.cmd in ("record", "rec"):
+        record(resolve(args.name))
+    elif args.cmd == "play":
+        play(resolve(args.name), repeat=max(1, args.repeat),
+             speed=args.speed if args.speed > 0 else 1.0, loop=args.loop)
+    elif args.cmd in ("list", "ls"):
+        list_macros()
+    else:
+        console(DEFAULT_MACRO)
+
+
+if __name__ == "__main__":
+    main()
